@@ -3,6 +3,11 @@ project(lomc)
 
 add_subdirectory(third_party)
 
-add_executable(demo demo.cpp)
+set(demo_sources
+    demo.cpp
+    image.hpp
+    )
+
+add_executable(demo ${demo_sources})
 target_link_libraries(demo tinypgm)
 
