@@ -1,0 +1,3 @@
+[submodule "src/third_party/tinypgm"]
+	path = src/third_party/tinypgm
+	url = https://github.com/mbitsnbites/tinypgm.git
