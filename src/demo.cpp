@@ -1,6 +1,7 @@
 #include "image.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <cstdint>
 #include <iostream>
 #include <stdexcept>
@@ -12,7 +13,15 @@ const int32_t BLOCK_HEIGHT = 8;
 
 uint8_t required_bits(const int32_t max_delta, const int32_t min_delta) {
   uint32_t v = static_cast<uint32_t>(std::max(max_delta, -min_delta));
-  return (v > 0u) ? static_cast<uint8_t>(32 - __builtin_clz(v) + 1) : 0u;
+  uint8_t num_bits = (v > 0u) ? static_cast<uint8_t>(32 - __builtin_clz(v) + 1) : 0u;
+  if (num_bits > 4) {
+    num_bits = 8;
+  } else if(num_bits > 2) {
+    num_bits = 4;
+  } else if(num_bits > 0) {
+    num_bits = 2;
+  }
+  return num_bits;
 }
 
 void block_row_delta(const uint8_t* src,
@@ -21,29 +30,18 @@ void block_row_delta(const uint8_t* src,
                      const int32_t src_stride,
                      const int32_t dst_stride,
                      uint8_t* dst,
-                     uint8_t& start_value,
                      uint8_t& num_bits) {
-  // Calculate the average pixel value of the first row.
-  int32_t row_sum = 0;
+  // The first row is a raw copy.
   for (int32_t x = 0; x < width; ++x) {
-    row_sum += static_cast<int32_t>(src[x]);
-  }
-  start_value = static_cast<uint8_t>((row_sum + (width / 2)) / width);
-
-  int8_t max_delta = -128;
-  int8_t min_delta = 127;
-
-  // The first row.
-  for (int32_t x = 0; x < width; ++x) {
-    const uint8_t delta = src[x] - start_value;
-    dst[x] = delta;
-    max_delta = std::max(max_delta, static_cast<int8_t>(delta));
-    min_delta = std::min(min_delta, static_cast<int8_t>(delta));
+    dst[x] = src[x];
   }
   src += src_stride;
   dst += dst_stride;
 
-  // All the following rows...
+  int8_t max_delta = -128;
+  int8_t min_delta = 127;
+
+  // All the following rows are delta to the previous row...
   for (int32_t y = 1; y < height; ++y) {
     for (int32_t x = 0; x < width; ++x) {
       const uint8_t delta = src[x] - src[x - src_stride];
@@ -52,6 +50,69 @@ void block_row_delta(const uint8_t* src,
       min_delta = std::min(min_delta, static_cast<int8_t>(delta));
     }
     src += src_stride;
+    dst += dst_stride;
+  }
+
+  num_bits = required_bits(max_delta, min_delta);
+}
+
+void block_2d_delta(const uint8_t* src,
+                    const int32_t width,
+                    const int32_t height,
+                    const int32_t src_stride,
+                    const int32_t dst_stride,
+                    uint8_t* dst,
+                    uint8_t& num_bits) {
+  int8_t max_delta = -128;
+  int8_t min_delta = 127;
+
+  for (int32_t y = 0; y < height; ++y) {
+    for (int32_t x = 0; x < width; ++x) {
+      uint8_t predicted;
+      if (x > 0 && y > 0) {
+        predicted = (src[x - 1] + src[x - src_stride]) - src[x - src_stride - 1];
+      } else if (x > 0) {
+        predicted = src[x - 1];
+      } else if (y > 0) {
+        predicted = src[x - src_stride];
+      } else {
+        predicted = 0;
+      }
+      const uint8_t delta = src[x] - predicted;
+      dst[x] = delta;
+      if (x > 0 || y > 0) {
+        max_delta = std::max(max_delta, static_cast<int8_t>(delta));
+        min_delta = std::min(min_delta, static_cast<int8_t>(delta));
+      }
+    }
+    src += src_stride;
+    dst += dst_stride;
+  }
+
+  num_bits = required_bits(max_delta, min_delta);
+}
+
+void block_frame_delta(const uint8_t* src1,
+                       const uint8_t* src2,
+                       const int32_t width,
+                       const int32_t height,
+                       const int32_t src_stride,
+                       const int32_t dst_stride,
+                       uint8_t* dst,
+                       uint8_t& num_bits) {
+  int8_t max_delta = -128;
+  int8_t min_delta = 127;
+
+  // All the following rows are delta to the previous row...
+  for (int32_t y = 0; y < height; ++y) {
+    for (int32_t x = 0; x < width; ++x) {
+      const uint8_t delta = src2[x] - src1[x];
+      dst[x] = delta;
+      max_delta = std::max(max_delta, static_cast<int8_t>(delta));
+      min_delta = std::min(min_delta, static_cast<int8_t>(delta));
+    }
+    src1 += src_stride;
+    src2 += src_stride;
     dst += dst_stride;
   }
 
@@ -79,24 +140,36 @@ int main(int argc, const char** argv) {
       lomc::image delta(img.width(), img.height());
       int32_t total_bits = 0;
       int32_t total_blocks = 0;
+
       for (int32_t y = 0; y < img.height(); y += BLOCK_HEIGHT) {
         const int32_t block_h = std::min(BLOCK_HEIGHT, img.height() - y);
         for (int32_t x = 0; x < img.width(); x += BLOCK_WIDTH) {
           const int32_t block_w = std::min(BLOCK_WIDTH, img.width() - x);
-          uint8_t start_value;
           uint8_t num_bits;
-          block_row_delta(&img[(y * img.stride()) + x],
-                          block_w,
-                          block_h,
-                          img.stride(),
-                          delta.stride(),
-                          &delta[(y * delta.stride()) + x],
-                          start_value,
-                          num_bits);
+          if (img_no == 0) {
+            block_row_delta(&img[(y * img.stride()) + x],
+                            block_w,
+                            block_h,
+                            img.stride(),
+                            delta.stride(),
+                            &delta[(y * delta.stride()) + x],
+                            num_bits);
+          } else {
+            lomc::image& prev_img = images[(img_no + 1) % 2];
+            assert(img.width() == prev_img.width() && img.height() == prev_img.height() &&
+                   img.stride() == prev_img.stride());
+            block_frame_delta(&prev_img[(y * img.stride()) + x],
+                              &img[(y * img.stride()) + x],
+                              block_w,
+                              block_h,
+                              img.stride(),
+                              delta.stride(),
+                              &delta[(y * delta.stride()) + x],
+                              num_bits);
+          }
           total_bits += static_cast<int32_t>(num_bits);
           ++total_blocks;
-          // std::cout << "s=" << static_cast<int32_t>(start_value)
-          //           << ", b=" << static_cast<int32_t>(num_bits) << "\n";
+          // std::cout << "b=" << static_cast<int32_t>(num_bits) << "\n";
         }
       }
       std::cout << "average bits="
