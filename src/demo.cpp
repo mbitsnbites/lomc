@@ -26,6 +26,169 @@ uint8_t required_bits(const int32_t max_delta, const int32_t min_delta) {
   return num_bits;
 }
 
+void packbits_1(const uint8_t* unpacked, uint8_t*& packed) {
+  // Read 16 bytes.
+  const uint32_t* src = reinterpret_cast<const uint32_t*>(unpacked);
+  uint32_t s1 = src[0];
+  uint32_t s2 = src[1];
+  uint32_t s3 = src[2];
+  uint32_t s4 = src[3];
+
+  // Combine into a single 16-bit word.
+  static const uint32_t mask1 = 0x01000000u;
+  static const uint32_t mask2 = 0x00010000u;
+  static const uint32_t mask3 = 0x00000100u;
+  static const uint32_t mask4 = 0x00000001u;
+  uint32_t d =
+      ((s1 & mask1) >> 9) | ((s1 & mask2) >> 2) | ((s1 & mask3) << 5) | ((s1 & mask4) << 12) |
+      ((s2 & mask1) >> 13) | ((s2 & mask2) >> 8) | ((s2 & mask3) << 1) | ((s2 & mask4) << 8) |
+      ((s3 & mask1) >> 17) | ((s3 & mask2) >> 10) | ((s3 & mask3) >> 3) | ((s3 & mask4) << 4) |
+      ((s4 & mask1) >> 21) | ((s4 & mask2) >> 14) | ((s4 & mask3) >> 7) | (s4 & mask4);
+
+  // Write 2 bytes.
+  uint16_t* dst = reinterpret_cast<uint16_t*>(packed);
+  dst[0] = static_cast<uint16_t>(d);
+  packed += 2;
+}
+
+void packbits_2(const uint8_t* unpacked, uint8_t*& packed) {
+  // Read 16 bytes.
+  const uint32_t* src = reinterpret_cast<const uint32_t*>(unpacked);
+  uint32_t s1 = src[0];
+  uint32_t s2 = src[1];
+  uint32_t s3 = src[2];
+  uint32_t s4 = src[3];
+
+  // Combine into a single 32-bit word.
+  static const uint32_t mask1 = 0x03000000u;
+  static const uint32_t mask2 = 0x00030000u;
+  static const uint32_t mask3 = 0x00000300u;
+  static const uint32_t mask4 = 0x00000003u;
+  uint32_t d =
+      ((s1 & mask1) << 6) | ((s1 & mask2) << 12) | ((s1 & mask3) << 18) | ((s1 & mask4) << 24) |
+      ((s2 & mask1) >> 2) | ((s2 & mask2) << 4) | ((s2 & mask3) << 10) | ((s2 & mask4) << 16) |
+      ((s3 & mask1) >> 10) | ((s3 & mask2) >> 4) | ((s3 & mask3) << 2) | ((s3 & mask4) << 8) |
+      ((s4 & mask1) >> 18) | ((s4 & mask2) >> 12) | ((s4 & mask3) >> 6) | (s4 & mask4);
+
+  // Write 4 bytes.
+  uint32_t* dst = reinterpret_cast<uint32_t*>(packed);
+  dst[0] = d;
+  packed += 4;
+}
+
+void packbits_4(const uint8_t* unpacked, uint8_t*& packed) {
+  // Read 16 bytes.
+  const uint32_t* src = reinterpret_cast<const uint32_t*>(unpacked);
+  uint32_t s1 = src[0];
+  uint32_t s2 = src[1];
+  uint32_t s3 = src[2];
+  uint32_t s4 = src[3];
+
+  // Combine into two 32-bit words.
+  static const uint32_t mask1 = 0x0f000000u;
+  static const uint32_t mask2 = 0x000f0000u;
+  static const uint32_t mask3 = 0x00000f00u;
+  static const uint32_t mask4 = 0x0000000fu;
+  uint32_t d1 =
+      ((s1 & mask1) << 4) | ((s1 & mask2) << 8) | ((s1 & mask3) << 12) | ((s1 & mask4) << 16) |
+      ((s2 & mask1) >> 12) | ((s2 & mask2) >> 8) | ((s2 & mask3) >> 4) | (s2 & mask4);
+  uint32_t d2 =
+      ((s3 & mask1) << 4) | ((s3 & mask2) << 8) | ((s3 & mask3) << 12) | ((s3 & mask4) << 16) |
+      ((s4 & mask1) >> 12) | ((s4 & mask2) >> 8) | ((s4 & mask3) >> 4) | (s4 & mask4);
+
+  // Write 8 bytes.
+  uint32_t* dst = reinterpret_cast<uint32_t*>(packed);
+  dst[0] = d1;
+  dst[1] = d2;
+  packed += 8;
+}
+
+void packbits_8(const uint8_t* unpacked, uint8_t*& packed) {
+  // Copy 16 bytes.
+  const uint32_t* src = reinterpret_cast<const uint32_t*>(unpacked);
+  uint32_t* dst = reinterpret_cast<uint32_t*>(packed);
+  dst[0] = src[0];
+  dst[1] = src[1];
+  dst[2] = src[2];
+  dst[3] = src[3];
+  packed += 16;
+}
+
+void unpackbits_1(const uint8_t*& packed, uint8_t* unpacked) {
+  // Read 2 bytes.
+  const uint16_t* src = reinterpret_cast<const uint16_t*>(packed);
+  uint32_t s1 = static_cast<uint32_t>(src[0]);
+  packed += 2;
+
+  // Split into four 32-bit words.
+  // TODO(m): Implement me!
+  uint32_t d1 = s1;
+  uint32_t d2 = s1;
+  uint32_t d3 = s1;
+  uint32_t d4 = s1;
+
+  // Write 16 bytes.
+  uint32_t* dst = reinterpret_cast<uint32_t*>(unpacked);
+  dst[0] = d1;
+  dst[1] = d2;
+  dst[2] = d3;
+  dst[3] = d4;
+}
+
+void unpackbits_2(const uint8_t*& packed, uint8_t* unpacked) {
+  // Read 4 bytes.
+  const uint32_t* src = reinterpret_cast<const uint32_t*>(packed);
+  uint32_t s1 = src[0];
+  packed += 4;
+
+  // Split into four 32-bit words.
+  // TODO(m): Implement me!
+  uint32_t d1 = s1;
+  uint32_t d2 = s1;
+  uint32_t d3 = s1;
+  uint32_t d4 = s1;
+
+  // Write 16 bytes.
+  uint32_t* dst = reinterpret_cast<uint32_t*>(unpacked);
+  dst[0] = d1;
+  dst[1] = d2;
+  dst[2] = d3;
+  dst[3] = d4;
+}
+
+void unpackbits_4(const uint8_t*& packed, uint8_t* unpacked) {
+  // Read 8 bytes.
+  const uint32_t* src = reinterpret_cast<const uint32_t*>(packed);
+  uint32_t s1 = src[0];
+  uint32_t s2 = src[1];
+  packed += 8;
+
+  // Split into four 32-bit words.
+  // TODO(m): Implement me!
+  uint32_t d1 = s1;
+  uint32_t d2 = s2;
+  uint32_t d3 = s1;
+  uint32_t d4 = s2;
+
+  // Write 16 bytes.
+  uint32_t* dst = reinterpret_cast<uint32_t*>(unpacked);
+  dst[0] = d1;
+  dst[1] = d2;
+  dst[2] = d3;
+  dst[3] = d4;
+}
+
+void unpackbits_8(const uint8_t*& packed, uint8_t* unpacked) {
+  // Copy 16 bytes.
+  const uint32_t* src = reinterpret_cast<const uint32_t*>(packed);
+  uint32_t* dst = reinterpret_cast<uint32_t*>(unpacked);
+  dst[0] = src[0];
+  dst[1] = src[1];
+  dst[2] = src[2];
+  dst[3] = src[3];
+  packed += 16;
+}
+
 void block_row_delta(const uint8_t* src,
                      const int32_t width,
                      const int32_t height,
