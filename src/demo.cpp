@@ -27,6 +27,11 @@ enum block_type {
   BLOCK_COPY = 2
 };
 
+uint8_t get_value_offset(const uint8_t num_bits) {
+  static const uint8_t value_offset_tab[9] = {0u, 1u, 2u, 0u, 8u, 0u, 0u, 0u, 0u};
+  return value_offset_tab[num_bits];
+}
+
 int32_t round_up(const int32_t x, const int32_t round_to) {
   return round_to * ((x + round_to - 1) / round_to);
 }
@@ -42,6 +47,13 @@ uint8_t required_bits(const int32_t max_delta, const int32_t min_delta) {
     num_bits = 2;
   }
   return num_bits;
+}
+
+void apply_offset(const uint8_t num_bits, uint8_t* unpacked) {
+  const uint8_t offset = get_value_offset(num_bits);
+  for (int i = 0; i < 16; ++i) {
+    unpacked[i] += offset;
+  }
 }
 
 void packbits_1(const uint8_t* unpacked, uint8_t*& packed) {
@@ -486,18 +498,6 @@ int main(int argc, const char** argv) {
 
           total_bits += static_cast<int32_t>(best_num_bits);
 
-#ifdef DEBUG_EXPORT_DELTA_IMAGE
-          // Copy the unpacked block data to the delta image (for debugging).
-          for (int32_t i = 0; i < block_h; ++i) {
-            int32_t yy = y + i;
-            const uint8_t* src_data = unpacked_block_data[selected_unpacked_block_no];
-            for (int32_t j = 0; j < block_w; ++j) {
-              int32_t xx = x + j;
-              delta[(yy * delta.stride()) + xx] = src_data[(i * BLOCK_WIDTH) + j];
-            }
-          }
-#endif
-
           // Output the control byte for this block.
           uint8_t control_byte = static_cast<uint8_t>(bt << 4) | best_num_bits;
           control_data_ptr[block_no] = control_byte;
@@ -505,8 +505,9 @@ int main(int argc, const char** argv) {
           // Output the packed pixel deltas.
           // Special case: BLOCK_DELTA_ROW always uses 8 bits for the first row.
           uint8_t num_bits_for_next_row = (bt == BLOCK_DELTA_ROW) ? 8 : best_num_bits;
-          const uint8_t* src_data = unpacked_block_data[selected_unpacked_block_no];
+          uint8_t* src_data = unpacked_block_data[selected_unpacked_block_no];
           for (int32_t row = 0; row < block_h; ++row) {
+            apply_offset(num_bits_for_next_row, src_data);
             switch (num_bits_for_next_row) {
             case 1u:
               packbits_1(src_data, packed_frame_data_ptr);
@@ -529,6 +530,17 @@ int main(int argc, const char** argv) {
             num_bits_for_next_row = best_num_bits;
           }
 
+#ifdef DEBUG_EXPORT_DELTA_IMAGE
+          // Copy the unpacked block data to the delta image (for debugging).
+          for (int32_t i = 0; i < block_h; ++i) {
+            int32_t yy = y + i;
+            const uint8_t* src_data = unpacked_block_data[selected_unpacked_block_no];
+            for (int32_t j = 0; j < block_w; ++j) {
+              int32_t xx = x + j;
+              delta[(yy * delta.stride()) + xx] = src_data[(i * BLOCK_WIDTH) + j];
+            }
+          }
+#endif
           ++block_no;
         }
       }
