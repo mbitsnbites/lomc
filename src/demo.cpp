@@ -21,11 +21,15 @@ const int32_t BLOCK_WIDTH = 16;
 const int32_t BLOCK_HEIGHT = 8;
 const int32_t FRAMES_BETWEEN_FORCED_KEY_BLOCK = 16;
 
-enum block_type {
-  BLOCK_DELTA_FRAME = 0,
-  BLOCK_DELTA_ROW = 1,
-  BLOCK_COPY = 2
-};
+#if 1
+const int32_t MOTION_DELTA_MIN = -8;
+const int32_t MOTION_DELTA_MAX = 7;
+#else
+const int32_t MOTION_DELTA_MIN = 0;
+const int32_t MOTION_DELTA_MAX = 0;
+#endif
+
+enum block_type { BLOCK_DELTA_FRAME = 0, BLOCK_DELTA_ROW = 1, BLOCK_COPY = 2 };
 
 uint8_t get_value_offset(const uint8_t num_bits) {
   static const uint8_t value_offset_tab[9] = {0u, 1u, 2u, 0u, 8u, 0u, 0u, 0u, 0u};
@@ -41,9 +45,9 @@ uint8_t required_bits(const int32_t max_delta, const int32_t min_delta) {
   uint8_t num_bits = (v > 0u) ? static_cast<uint8_t>(32 - __builtin_clz(v) + 1) : 0u;
   if (num_bits > 4) {
     num_bits = 8;
-  } else if(num_bits > 2) {
+  } else if (num_bits > 2) {
     num_bits = 4;
-  } else if(num_bits > 0) {
+  } else if (num_bits > 0) {
     num_bits = 2;
   }
   return num_bits;
@@ -69,11 +73,11 @@ void packbits_1(const uint8_t* unpacked, uint8_t*& packed) {
   static const uint32_t mask2 = 0x00010000u;
   static const uint32_t mask3 = 0x00000100u;
   static const uint32_t mask4 = 0x00000001u;
-  uint32_t d =
-      ((s1 & mask1) >> 9) | ((s1 & mask2) >> 2) | ((s1 & mask3) << 5) | ((s1 & mask4) << 12) |
-      ((s2 & mask1) >> 13) | ((s2 & mask2) >> 8) | ((s2 & mask3) << 1) | ((s2 & mask4) << 8) |
-      ((s3 & mask1) >> 17) | ((s3 & mask2) >> 10) | ((s3 & mask3) >> 3) | ((s3 & mask4) << 4) |
-      ((s4 & mask1) >> 21) | ((s4 & mask2) >> 14) | ((s4 & mask3) >> 7) | (s4 & mask4);
+  uint32_t d = ((s1 & mask1) >> 9) | ((s1 & mask2) >> 2) | ((s1 & mask3) << 5) |
+               ((s1 & mask4) << 12) | ((s2 & mask1) >> 13) | ((s2 & mask2) >> 8) |
+               ((s2 & mask3) << 1) | ((s2 & mask4) << 8) | ((s3 & mask1) >> 17) |
+               ((s3 & mask2) >> 10) | ((s3 & mask3) >> 3) | ((s3 & mask4) << 4) |
+               ((s4 & mask1) >> 21) | ((s4 & mask2) >> 14) | ((s4 & mask3) >> 7) | (s4 & mask4);
 
   // Write 2 bytes.
   uint16_t* dst = reinterpret_cast<uint16_t*>(packed);
@@ -94,11 +98,11 @@ void packbits_2(const uint8_t* unpacked, uint8_t*& packed) {
   static const uint32_t mask2 = 0x00030000u;
   static const uint32_t mask3 = 0x00000300u;
   static const uint32_t mask4 = 0x00000003u;
-  uint32_t d =
-      ((s1 & mask1) << 6) | ((s1 & mask2) << 12) | ((s1 & mask3) << 18) | ((s1 & mask4) << 24) |
-      ((s2 & mask1) >> 2) | ((s2 & mask2) << 4) | ((s2 & mask3) << 10) | ((s2 & mask4) << 16) |
-      ((s3 & mask1) >> 10) | ((s3 & mask2) >> 4) | ((s3 & mask3) << 2) | ((s3 & mask4) << 8) |
-      ((s4 & mask1) >> 18) | ((s4 & mask2) >> 12) | ((s4 & mask3) >> 6) | (s4 & mask4);
+  uint32_t d = ((s1 & mask1) << 6) | ((s1 & mask2) << 12) | ((s1 & mask3) << 18) |
+               ((s1 & mask4) << 24) | ((s2 & mask1) >> 2) | ((s2 & mask2) << 4) |
+               ((s2 & mask3) << 10) | ((s2 & mask4) << 16) | ((s3 & mask1) >> 10) |
+               ((s3 & mask2) >> 4) | ((s3 & mask3) << 2) | ((s3 & mask4) << 8) |
+               ((s4 & mask1) >> 18) | ((s4 & mask2) >> 12) | ((s4 & mask3) >> 6) | (s4 & mask4);
 
   // Write 4 bytes.
   uint32_t* dst = reinterpret_cast<uint32_t*>(packed);
@@ -119,12 +123,12 @@ void packbits_4(const uint8_t* unpacked, uint8_t*& packed) {
   static const uint32_t mask2 = 0x000f0000u;
   static const uint32_t mask3 = 0x00000f00u;
   static const uint32_t mask4 = 0x0000000fu;
-  uint32_t d1 =
-      ((s1 & mask1) << 4) | ((s1 & mask2) << 8) | ((s1 & mask3) << 12) | ((s1 & mask4) << 16) |
-      ((s2 & mask1) >> 12) | ((s2 & mask2) >> 8) | ((s2 & mask3) >> 4) | (s2 & mask4);
-  uint32_t d2 =
-      ((s3 & mask1) << 4) | ((s3 & mask2) << 8) | ((s3 & mask3) << 12) | ((s3 & mask4) << 16) |
-      ((s4 & mask1) >> 12) | ((s4 & mask2) >> 8) | ((s4 & mask3) >> 4) | (s4 & mask4);
+  uint32_t d1 = ((s1 & mask1) << 4) | ((s1 & mask2) << 8) | ((s1 & mask3) << 12) |
+                ((s1 & mask4) << 16) | ((s2 & mask1) >> 12) | ((s2 & mask2) >> 8) |
+                ((s2 & mask3) >> 4) | (s2 & mask4);
+  uint32_t d2 = ((s3 & mask1) << 4) | ((s3 & mask2) << 8) | ((s3 & mask3) << 12) |
+                ((s3 & mask4) << 16) | ((s4 & mask1) >> 12) | ((s4 & mask2) >> 8) |
+                ((s4 & mask3) >> 4) | (s4 & mask4);
 
   // Write 8 bytes.
   uint32_t* dst = reinterpret_cast<uint32_t*>(packed);
@@ -295,7 +299,7 @@ void block_frame_delta(const uint8_t* src1,
   int8_t max_delta = -128;
   int8_t min_delta = 127;
 
-  // All the following rows are delta to the previous row...
+  // Delta to the previous image.
   for (int32_t y = 0; y < height; ++y) {
     for (int32_t x = 0; x < width; ++x) {
       const uint8_t delta = src2[x] - src1[x];
@@ -312,11 +316,11 @@ void block_frame_delta(const uint8_t* src1,
 }
 
 void block_copy(const uint8_t* src,
-                       const int32_t width,
-                       const int32_t height,
-                       const int32_t src_stride,
-                       uint8_t* dst,
-                       uint8_t& num_bits) {
+                const int32_t width,
+                const int32_t height,
+                const int32_t src_stride,
+                uint8_t* dst,
+                uint8_t& num_bits) {
   for (int32_t y = 0; y < height; ++y) {
     std::memcpy(dst, src, static_cast<size_t>(width));
     src += src_stride;
@@ -436,7 +440,7 @@ int main(int argc, const char** argv) {
               (((img_no + block_no) % FRAMES_BETWEEN_FORCED_KEY_BLOCK) == 0);
           const bool can_do_frame_delta = (img_no > 0) && !force_key_block;
 
-          uint8_t best_num_bits = 8;
+          uint8_t best_num_bits = 9;
           int32_t selected_unpacked_block_no = 0;
           block_type bt = BLOCK_COPY;
 
@@ -447,19 +451,31 @@ int main(int argc, const char** argv) {
                    img.stride() == prev_img.stride());
 
             // Make a delta to the previous frame. This ususally has the best compression.
-            int32_t unpacked_block_no = (selected_unpacked_block_no + 1) % 2;
-            uint8_t num_bits;
-            block_frame_delta(&prev_img[(y * img.stride()) + x],
-                              &img[(y * img.stride()) + x],
-                              block_w,
-                              block_h,
-                              img.stride(),
-                              unpacked_block_data[unpacked_block_no],
-                              num_bits);
-            if (num_bits < best_num_bits) {
-              bt = BLOCK_DELTA_FRAME;
-              best_num_bits = num_bits;
-              selected_unpacked_block_no = unpacked_block_no;
+            const int32_t min_x_offset = std::max(MOTION_DELTA_MIN, -x);
+            const int32_t max_x_offset = std::min(MOTION_DELTA_MAX, width - block_w - x);
+            const int32_t min_y_offset = std::max(MOTION_DELTA_MIN, -y);
+            const int32_t max_y_offset = std::min(MOTION_DELTA_MAX, height - block_h - y);
+            int32_t best_dx = 0;
+            int32_t best_dy = 0;
+            for (int32_t dy = min_y_offset; dy <= max_y_offset; ++dy) {
+              for (int32_t dx = min_x_offset; dx <= max_x_offset; ++dx) {
+                int32_t unpacked_block_no = (selected_unpacked_block_no + 1) % 2;
+                uint8_t num_bits;
+                block_frame_delta(&prev_img[((y + dy) * img.stride()) + (x + dx)],
+                                  &img[(y * img.stride()) + x],
+                                  block_w,
+                                  block_h,
+                                  img.stride(),
+                                  unpacked_block_data[unpacked_block_no],
+                                  num_bits);
+                if (num_bits < best_num_bits) {
+                  bt = BLOCK_DELTA_FRAME;
+                  best_num_bits = num_bits;
+                  selected_unpacked_block_no = unpacked_block_no;
+                  best_dx = dx;  // TODO(m): These should be encoded as part of the block meta.
+                  best_dy = dy;
+                }
+              }
             }
           }
 
@@ -482,7 +498,7 @@ int main(int argc, const char** argv) {
           }
 
           // Fall back to block copy if we could not pack.
-          if (best_num_bits == 8) {
+          if (best_num_bits >= 8) {
             int32_t unpacked_block_no = (selected_unpacked_block_no + 1) % 2;
             uint8_t num_bits;
             block_copy(&img[(y * img.stride()) + x],
@@ -509,22 +525,22 @@ int main(int argc, const char** argv) {
           for (int32_t row = 0; row < block_h; ++row) {
             apply_offset(num_bits_for_next_row, src_data);
             switch (num_bits_for_next_row) {
-            case 1u:
-              packbits_1(src_data, packed_frame_data_ptr);
-              break;
-            case 2u:
-              packbits_2(src_data, packed_frame_data_ptr);
-              break;
-            case 4u:
-              packbits_4(src_data, packed_frame_data_ptr);
-              break;
-            case 8u:
-              packbits_8(src_data, packed_frame_data_ptr);
-              break;
-            case 0u:
-              break;
-            default:
-              throw std::runtime_error("Invalid num_bits");
+              case 1u:
+                packbits_1(src_data, packed_frame_data_ptr);
+                break;
+              case 2u:
+                packbits_2(src_data, packed_frame_data_ptr);
+                break;
+              case 4u:
+                packbits_4(src_data, packed_frame_data_ptr);
+                break;
+              case 8u:
+                packbits_8(src_data, packed_frame_data_ptr);
+                break;
+              case 0u:
+                break;
+              default:
+                throw std::runtime_error("Invalid num_bits");
             }
             src_data += BLOCK_WIDTH;
             num_bits_for_next_row = best_num_bits;
