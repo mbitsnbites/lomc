@@ -3,15 +3,33 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
+#include <cstring>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <stdexcept>
 #include <sstream>
+#include <vector>
+
+#ifndef NDEBUG
+#define DEBUG_EXPORT_DELTA_IMAGE
+#define DEBUG_PRINT_INFO
+#endif
 
 namespace {
 const int32_t BLOCK_WIDTH = 16;
 const int32_t BLOCK_HEIGHT = 8;
 const int32_t FRAMES_BETWEEN_FORCED_KEY_BLOCK = 16;
+
+enum block_type {
+  BLOCK_DELTA_FRAME = 0,
+  BLOCK_DELTA_ROW = 1,
+  BLOCK_COPY = 2
+};
+
+int32_t round_up(const int32_t x, const int32_t round_to) {
+  return round_to * ((x + round_to - 1) / round_to);
+}
 
 uint8_t required_bits(const int32_t max_delta, const int32_t min_delta) {
   uint32_t v = static_cast<uint32_t>(std::max(max_delta, -min_delta));
@@ -193,7 +211,6 @@ void block_row_delta(const uint8_t* src,
                      const int32_t width,
                      const int32_t height,
                      const int32_t src_stride,
-                     const int32_t dst_stride,
                      uint8_t* dst,
                      uint8_t& num_bits) {
   // The first row is a raw copy.
@@ -201,7 +218,7 @@ void block_row_delta(const uint8_t* src,
     dst[x] = src[x];
   }
   src += src_stride;
-  dst += dst_stride;
+  dst += BLOCK_WIDTH;
 
   int8_t max_delta = -128;
   int8_t min_delta = 127;
@@ -215,7 +232,7 @@ void block_row_delta(const uint8_t* src,
       min_delta = std::min(min_delta, static_cast<int8_t>(delta));
     }
     src += src_stride;
-    dst += dst_stride;
+    dst += BLOCK_WIDTH;
   }
 
   num_bits = required_bits(max_delta, min_delta);
@@ -225,7 +242,6 @@ void block_2d_delta(const uint8_t* src,
                     const int32_t width,
                     const int32_t height,
                     const int32_t src_stride,
-                    const int32_t dst_stride,
                     uint8_t* dst,
                     uint8_t& num_bits) {
   int8_t max_delta = -128;
@@ -251,7 +267,7 @@ void block_2d_delta(const uint8_t* src,
       }
     }
     src += src_stride;
-    dst += dst_stride;
+    dst += BLOCK_WIDTH;
   }
 
   num_bits = required_bits(max_delta, min_delta);
@@ -262,7 +278,6 @@ void block_frame_delta(const uint8_t* src1,
                        const int32_t width,
                        const int32_t height,
                        const int32_t src_stride,
-                       const int32_t dst_stride,
                        uint8_t* dst,
                        uint8_t& num_bits) {
   int8_t max_delta = -128;
@@ -278,39 +293,126 @@ void block_frame_delta(const uint8_t* src1,
     }
     src1 += src_stride;
     src2 += src_stride;
-    dst += dst_stride;
+    dst += BLOCK_WIDTH;
   }
 
   num_bits = required_bits(max_delta, min_delta);
 }
 
+void block_copy(const uint8_t* src,
+                       const int32_t width,
+                       const int32_t height,
+                       const int32_t src_stride,
+                       uint8_t* dst,
+                       uint8_t& num_bits) {
+  for (int32_t y = 0; y < height; ++y) {
+    std::memcpy(dst, src, static_cast<size_t>(width));
+    src += src_stride;
+    dst += BLOCK_WIDTH;
+  }
+
+  num_bits = 8u;
+}
+
+void pack_int32(const int32_t x, uint8_t* data) {
+  data[0] = static_cast<uint8_t>(x);
+  data[1] = static_cast<uint8_t>(x >> 8);
+  data[2] = static_cast<uint8_t>(x >> 16);
+  data[3] = static_cast<uint8_t>(x >> 24);
+}
+
+void write_header(const int32_t num_images,
+                  const int32_t width,
+                  const int32_t height,
+                  std::ofstream& packed_file) {
+  // Signature.
+  packed_file << "LOMC\1";
+
+  uint8_t x4[4];
+
+  // Width.
+  pack_int32(width, x4);
+  packed_file.write(reinterpret_cast<const char*>(x4), 4);
+
+  // Height.
+  pack_int32(height, x4);
+  packed_file.write(reinterpret_cast<const char*>(x4), 4);
+
+  // Num images.
+  pack_int32(num_images, x4);
+  packed_file.write(reinterpret_cast<const char*>(x4), 4);
+}
 }  // namespace
 
 int main(int argc, const char** argv) {
   try {
+    const int32_t num_images = argc - 1;
+    if (num_images < 1) {
+      throw std::runtime_error("No input files provided.");
+    }
+
+    // Read the first image to detrmine the movie properties.
+    int32_t width;
+    int32_t height;
+    {
+      lomc::image first_img;
+      first_img.load(argv[1]);
+      width = first_img.width();
+      height = first_img.height();
+    }
+    const int32_t out_stride = round_up(width, BLOCK_WIDTH);
+    const int32_t num_blocks =
+        ((width + BLOCK_WIDTH - 1) / BLOCK_WIDTH) * ((height + BLOCK_HEIGHT - 1) / BLOCK_HEIGHT);
+
+#ifdef DEBUG_PRINT_INFO
+    std::cout << "Dimensions: " << width << "x" << height << "\n";
+    std::cout << "# frames: " << num_images << "\n";
+    std::cout << "# blocks / frame: " << num_blocks << "\n";
+#endif
+
+    // Create the output file.
+    std::ofstream packed_file("packed.lmc", std::ios::out | std::ios::binary);
+    write_header(num_images, width, height, packed_file);
+
+    // Create a working buffer for packed data.
+    const int32_t control_data_size = round_up(num_blocks, BLOCK_WIDTH);
+    std::vector<uint8_t> packed_frame_data(
+        static_cast<size_t>(4 + control_data_size + (out_stride * height)));
+
+    // Pack all images.
+    int64_t total_packed_size = 0;
     lomc::image images[2];
-    const int num_images = argc - 1;
-    for (int img_no = 0; img_no < num_images; ++img_no) {
+    for (int32_t img_no = 0u; img_no < num_images; ++img_no) {
       lomc::image& img = images[img_no % 2];
 
       // Load the image.
       std::string file_name = argv[img_no + 1];
-      std::cout << "Image #" << img_no << ": " << file_name << "\n";
       img.load(file_name);
-      std::cout << "   width: " << img.width() << "\n";
-      std::cout << "  height: " << img.height() << "\n";
-      std::cout << "  stride: " << img.stride() << "\n";
+      if (img.width() != width || img.height() != height) {
+        throw std::runtime_error("Incompatible image dimensions!");
+      }
 
-      // Generate the delta image.
+#ifdef DEBUG_PRINT_INFO
+      std::cout << "Image #" << img_no << ": " << file_name << " (" << img.width() << "x"
+                << img.height() << ")\n";
+#endif
+
+#ifdef DEBUG_EXPORT_DELTA_IMAGE
       lomc::image delta(img.width(), img.height());
-      int32_t total_bits = 0;
-      int32_t total_blocks = 0;
+#endif
 
+      int32_t total_bits = 0;
+
+      // Iterate over all the blocks and pack them individually.
+      uint8_t* control_data_ptr = packed_frame_data.data() + 4;
+      uint8_t* packed_frame_data_ptr = control_data_ptr + control_data_size;
       int32_t block_no = 0;
       for (int32_t y = 0; y < img.height(); y += BLOCK_HEIGHT) {
         const int32_t block_h = std::min(BLOCK_HEIGHT, img.height() - y);
         for (int32_t x = 0; x < img.width(); x += BLOCK_WIDTH) {
           const int32_t block_w = std::min(BLOCK_WIDTH, img.width() - x);
+
+          uint8_t unpacked_block_data[BLOCK_WIDTH * BLOCK_HEIGHT];
 
           // Every now and then we force each block to be encoded independently of the previous
           // frame in order to be able to recover from frame losses and similar. From any given
@@ -318,16 +420,21 @@ int main(int argc, const char** argv) {
           // reconstructed.
           const bool force_key_block =
               (((img_no + block_no) % FRAMES_BETWEEN_FORCED_KEY_BLOCK) == 0);
+          block_type bt;
+          if ((img_no == 0) || force_key_block) {
+            bt = BLOCK_DELTA_ROW;
+          } else {
+            bt = BLOCK_DELTA_FRAME;
+          }
 
           uint8_t num_bits;
-          if ((img_no == 0) || force_key_block) {
+          if (bt == BLOCK_DELTA_ROW) {
             // Do not depend on the previous frame. This does not compress as good.
             block_row_delta(&img[(y * img.stride()) + x],
                             block_w,
                             block_h,
                             img.stride(),
-                            delta.stride(),
-                            &delta[(y * delta.stride()) + x],
+                            unpacked_block_data,
                             num_bits);
           } else {
             lomc::image& prev_img = images[(img_no + 1) % 2];
@@ -340,23 +447,99 @@ int main(int argc, const char** argv) {
                               block_w,
                               block_h,
                               img.stride(),
-                              delta.stride(),
-                              &delta[(y * delta.stride()) + x],
+                              unpacked_block_data,
                               num_bits);
           }
+
+          // Fall back to block copy if we could not pack.
+          if (num_bits == 8) {
+            bt = BLOCK_COPY;
+            block_copy(&img[(y * img.stride()) + x],
+                       block_w,
+                       block_h,
+                       img.stride(),
+                       unpacked_block_data,
+                       num_bits);
+          }
+
           total_bits += static_cast<int32_t>(num_bits);
-          ++total_blocks;
+
+#ifdef DEBUG_EXPORT_DELTA_IMAGE
+          // Copy the unpacked block data to the delta image (for debugging).
+          for (int32_t i = 0; i < block_h; ++i) {
+            int32_t yy = y + i;
+            for (int32_t j = 0; j < block_w; ++j) {
+              int32_t xx = x + j;
+              delta[(yy * delta.stride()) + xx] = unpacked_block_data[(i * BLOCK_WIDTH) + j];
+            }
+          }
+#endif
+
+          // Output the control byte for this block.
+          uint8_t control_byte = static_cast<uint8_t>(bt << 4) | num_bits;
+          control_data_ptr[block_no] = control_byte;
+
+          // Output the packed pixel deltas.
+          // Special case: BLOCK_DELTA_ROW always uses 8 bits for the first row.
+          uint8_t num_bits_for_next_row = (bt == BLOCK_DELTA_ROW) ? 8 : num_bits;
+          for (int32_t row = 0; row < block_h; ++row) {
+            switch (num_bits_for_next_row) {
+            case 1u:
+              packbits_1(&unpacked_block_data[row], packed_frame_data_ptr);
+              break;
+            case 2u:
+              packbits_2(&unpacked_block_data[row], packed_frame_data_ptr);
+              break;
+            case 4u:
+              packbits_4(&unpacked_block_data[row], packed_frame_data_ptr);
+              break;
+            case 8u:
+              packbits_8(&unpacked_block_data[row], packed_frame_data_ptr);
+              break;
+            case 0u:
+              break;
+            default:
+              throw std::runtime_error("Invalid num_bits");
+            }
+            num_bits_for_next_row = num_bits;
+          }
+
           ++block_no;
         }
       }
-      std::cout << "average bits="
-                << static_cast<double>(total_bits) / static_cast<double>(total_blocks) << "\n";
 
-      // Save something...
+      // Append the packed data to the output stream.
+      int32_t packed_frame_size =
+          static_cast<int32_t>(reinterpret_cast<intptr_t>(packed_frame_data_ptr) -
+                               reinterpret_cast<intptr_t>(packed_frame_data.data()));
+      pack_int32(packed_frame_size, &packed_frame_data[0]);
+      packed_file.write(reinterpret_cast<const char*>(packed_frame_data.data()), packed_frame_size);
+      total_packed_size += static_cast<int64_t>(packed_frame_size);
+
+#ifdef DEBUG_PRINT_INFO
+      std::cout << "Frame size: " << packed_frame_size << "\n";
+      std::cout << "Average bits: "
+                << static_cast<double>(total_bits) / static_cast<double>(num_blocks) << "\n";
+#endif
+
+#ifdef DEBUG_EXPORT_DELTA_IMAGE
+      // Export the delta image.
       std::ostringstream out_name;
       out_name << "out_image_" << std::setfill('0') << std::setw(4) << img_no << ".pgm";
       delta.save(out_name.str());
+#endif
     }
+
+#ifdef DEBUG_PRINT_INFO
+    const int64_t total_unpacked_size =
+        static_cast<int64_t>(num_images) * static_cast<int64_t>(width * height);
+    const double compression_ratio =
+        static_cast<double>(total_packed_size) / static_cast<double>(total_unpacked_size);
+    std::cout << "Compression ratio: " << (100.0 * compression_ratio) << "%\n";
+#endif
+
+    // Close the output file.
+    packed_file.close();
   } catch (std::exception& e) {
     std::cerr << "EXCEPTION: " << e.what() << std::endl;
     return 1;
