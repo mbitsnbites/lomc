@@ -412,7 +412,9 @@ int main(int argc, const char** argv) {
         for (int32_t x = 0; x < img.width(); x += BLOCK_WIDTH) {
           const int32_t block_w = std::min(BLOCK_WIDTH, img.width() - x);
 
-          uint8_t unpacked_block_data[BLOCK_WIDTH * BLOCK_HEIGHT];
+          uint8_t unpacked_block_data_mem[BLOCK_WIDTH * BLOCK_HEIGHT * 2];
+          uint8_t* unpacked_block_data[2] = {&unpacked_block_data_mem[0],
+                                             &unpacked_block_data_mem[BLOCK_WIDTH * BLOCK_HEIGHT]};
 
           // Every now and then we force each block to be encoded independently of the previous
           // frame in order to be able to recover from frame losses and similar. From any given
@@ -420,88 +422,111 @@ int main(int argc, const char** argv) {
           // reconstructed.
           const bool force_key_block =
               (((img_no + block_no) % FRAMES_BETWEEN_FORCED_KEY_BLOCK) == 0);
-          block_type bt;
-          if ((img_no == 0) || force_key_block) {
-            bt = BLOCK_DELTA_ROW;
-          } else {
-            bt = BLOCK_DELTA_FRAME;
-          }
+          const bool can_do_frame_delta = (img_no > 0) && !force_key_block;
 
-          uint8_t num_bits;
-          if (bt == BLOCK_DELTA_ROW) {
-            // Do not depend on the previous frame. This does not compress as good.
-            block_row_delta(&img[(y * img.stride()) + x],
-                            block_w,
-                            block_h,
-                            img.stride(),
-                            unpacked_block_data,
-                            num_bits);
-          } else {
+          uint8_t best_num_bits = 8;
+          int32_t selected_unpacked_block_no = 0;
+          block_type bt = BLOCK_COPY;
+
+          // First choice: frame delta.
+          if (can_do_frame_delta) {
             lomc::image& prev_img = images[(img_no + 1) % 2];
             assert(img.width() == prev_img.width() && img.height() == prev_img.height() &&
                    img.stride() == prev_img.stride());
 
             // Make a delta to the previous frame. This ususally has the best compression.
+            int32_t unpacked_block_no = (selected_unpacked_block_no + 1) % 2;
+            uint8_t num_bits;
             block_frame_delta(&prev_img[(y * img.stride()) + x],
                               &img[(y * img.stride()) + x],
                               block_w,
                               block_h,
                               img.stride(),
-                              unpacked_block_data,
+                              unpacked_block_data[unpacked_block_no],
                               num_bits);
+            if (num_bits < best_num_bits) {
+              bt = BLOCK_DELTA_FRAME;
+              best_num_bits = num_bits;
+              selected_unpacked_block_no = unpacked_block_no;
+            }
+          }
+
+          // Second choice: row delta.
+          if (best_num_bits > 2) {
+            // Do not depend on the previous frame. This does not compress as good.
+            int32_t unpacked_block_no = (selected_unpacked_block_no + 1) % 2;
+            uint8_t num_bits;
+            block_row_delta(&img[(y * img.stride()) + x],
+                            block_w,
+                            block_h,
+                            img.stride(),
+                            unpacked_block_data[unpacked_block_no],
+                            num_bits);
+            if (num_bits < best_num_bits) {
+              bt = BLOCK_DELTA_ROW;
+              best_num_bits = num_bits;
+              selected_unpacked_block_no = unpacked_block_no;
+            }
           }
 
           // Fall back to block copy if we could not pack.
-          if (num_bits == 8) {
-            bt = BLOCK_COPY;
+          if (best_num_bits == 8) {
+            int32_t unpacked_block_no = (selected_unpacked_block_no + 1) % 2;
+            uint8_t num_bits;
             block_copy(&img[(y * img.stride()) + x],
                        block_w,
                        block_h,
                        img.stride(),
-                       unpacked_block_data,
+                       unpacked_block_data[unpacked_block_no],
                        num_bits);
+            bt = BLOCK_COPY;
+            best_num_bits = num_bits;
+            selected_unpacked_block_no = unpacked_block_no;
           }
 
-          total_bits += static_cast<int32_t>(num_bits);
+          total_bits += static_cast<int32_t>(best_num_bits);
 
 #ifdef DEBUG_EXPORT_DELTA_IMAGE
           // Copy the unpacked block data to the delta image (for debugging).
           for (int32_t i = 0; i < block_h; ++i) {
             int32_t yy = y + i;
+            const uint8_t* src_data = unpacked_block_data[selected_unpacked_block_no];
             for (int32_t j = 0; j < block_w; ++j) {
               int32_t xx = x + j;
-              delta[(yy * delta.stride()) + xx] = unpacked_block_data[(i * BLOCK_WIDTH) + j];
+              delta[(yy * delta.stride()) + xx] = src_data[(i * BLOCK_WIDTH) + j];
             }
           }
 #endif
 
           // Output the control byte for this block.
-          uint8_t control_byte = static_cast<uint8_t>(bt << 4) | num_bits;
+          uint8_t control_byte = static_cast<uint8_t>(bt << 4) | best_num_bits;
           control_data_ptr[block_no] = control_byte;
 
           // Output the packed pixel deltas.
           // Special case: BLOCK_DELTA_ROW always uses 8 bits for the first row.
-          uint8_t num_bits_for_next_row = (bt == BLOCK_DELTA_ROW) ? 8 : num_bits;
+          uint8_t num_bits_for_next_row = (bt == BLOCK_DELTA_ROW) ? 8 : best_num_bits;
+          const uint8_t* src_data = unpacked_block_data[selected_unpacked_block_no];
           for (int32_t row = 0; row < block_h; ++row) {
             switch (num_bits_for_next_row) {
             case 1u:
-              packbits_1(&unpacked_block_data[row], packed_frame_data_ptr);
+              packbits_1(src_data, packed_frame_data_ptr);
               break;
             case 2u:
-              packbits_2(&unpacked_block_data[row], packed_frame_data_ptr);
+              packbits_2(src_data, packed_frame_data_ptr);
               break;
             case 4u:
-              packbits_4(&unpacked_block_data[row], packed_frame_data_ptr);
+              packbits_4(src_data, packed_frame_data_ptr);
               break;
             case 8u:
-              packbits_8(&unpacked_block_data[row], packed_frame_data_ptr);
+              packbits_8(src_data, packed_frame_data_ptr);
               break;
             case 0u:
               break;
             default:
               throw std::runtime_error("Invalid num_bits");
             }
-            num_bits_for_next_row = num_bits;
+            src_data += BLOCK_WIDTH;
+            num_bits_for_next_row = best_num_bits;
           }
 
           ++block_no;
