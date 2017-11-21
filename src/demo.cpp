@@ -21,7 +21,7 @@ const int32_t BLOCK_WIDTH = 16;
 const int32_t BLOCK_HEIGHT = 8;
 const int32_t FRAMES_BETWEEN_FORCED_KEY_BLOCK = 16;
 
-#if 1
+#if 0
 const int32_t MOTION_DELTA_MIN = -8;
 const int32_t MOTION_DELTA_MAX = 7;
 #else
@@ -31,16 +31,12 @@ const int32_t MOTION_DELTA_MAX = 0;
 
 enum block_type { BLOCK_DELTA_FRAME = 0, BLOCK_DELTA_ROW = 1, BLOCK_COPY = 2 };
 
-uint8_t get_value_offset(const uint8_t num_bits) {
-  static const uint8_t value_offset_tab[9] = {0u, 1u, 2u, 0u, 8u, 0u, 0u, 0u, 0u};
-  return value_offset_tab[num_bits];
-}
-
 int32_t round_up(const int32_t x, const int32_t round_to) {
   return round_to * ((x + round_to - 1) / round_to);
 }
 
-uint8_t required_bits(const int32_t max_delta, const int32_t min_delta) {
+#if 0
+uint8_t required_bits_old(const int32_t max_delta, const int32_t min_delta) {
   uint32_t v = static_cast<uint32_t>(std::max(max_delta, -min_delta));
   uint8_t num_bits = (v > 0u) ? static_cast<uint8_t>(32 - __builtin_clz(v) + 1) : 0u;
   if (num_bits > 4) {
@@ -52,11 +48,39 @@ uint8_t required_bits(const int32_t max_delta, const int32_t min_delta) {
   }
   return num_bits;
 }
+#endif
+
+uint8_t required_bits(const uint32_t max_neg_delta, const uint32_t max_pos_delta) {
+  uint8_t num_bits;
+  if ((max_pos_delta <= 0x00u) && (max_neg_delta >= 0x00000100u)) {
+    num_bits = 0u;
+  } else if ((max_pos_delta <= 0x00u) && (max_neg_delta >= 0x000000ffu)) {
+    num_bits = 1u;
+  } else if ((max_pos_delta <= 0x01u) && (max_neg_delta >= 0x000000feu)) {
+    num_bits = 2u;
+  } else if ((max_pos_delta <= 0x07u) && (max_neg_delta >= 0x000000f8u)) {
+    num_bits = 4u;
+  } else {
+    num_bits = 8u;
+  }
+  return num_bits;
+}
+
+uint8_t get_value_offset(const uint8_t num_bits) {
+  static const uint8_t value_offset_tab[9] = {0u, 1u, 2u, 0u, 8u, 0u, 0u, 0u, 0u};
+  return value_offset_tab[num_bits];
+}
 
 void apply_offset(const uint8_t num_bits, uint8_t* unpacked) {
   const uint8_t offset = get_value_offset(num_bits);
-  for (int i = 0; i < 16; ++i) {
-    unpacked[i] += offset;
+  if (offset > 0u) {
+    for (int i = 0; i < 16; ++i) {
+      unpacked[i] += offset;
+      if (num_bits < 8u && (unpacked[i] & 0x80u)) {
+        std::flush(std::cout);
+        throw std::runtime_error("WTF?!");
+      }
+    }
   }
 }
 
@@ -223,6 +247,35 @@ void unpackbits_8(const uint8_t*& packed, uint8_t* unpacked) {
   packed += 16;
 }
 
+void block_frame_delta(const uint8_t* src1,
+                       const uint8_t* src2,
+                       const int32_t width,
+                       const int32_t height,
+                       const int32_t src_stride,
+                       uint8_t* dst,
+                       uint8_t& num_bits) {
+  uint32_t max_pos_delta = 0u;
+  uint32_t max_neg_delta = 256u;
+
+  // Delta to the previous image.
+  for (int32_t y = 0; y < height; ++y) {
+    for (int32_t x = 0; x < width; ++x) {
+      const uint8_t delta = src2[x] - src1[x];
+      dst[x] = delta;
+      if (delta & 0x80u) {
+        max_neg_delta = std::min(max_neg_delta, static_cast<uint32_t>(delta));
+      } else {
+        max_pos_delta = std::max(max_pos_delta, static_cast<uint32_t>(delta));
+      }
+    }
+    src1 += src_stride;
+    src2 += src_stride;
+    dst += BLOCK_WIDTH;
+  }
+
+  num_bits = required_bits(max_neg_delta, max_pos_delta);
+}
+
 void block_row_delta(const uint8_t* src,
                      const int32_t width,
                      const int32_t height,
@@ -236,22 +289,25 @@ void block_row_delta(const uint8_t* src,
   src += src_stride;
   dst += BLOCK_WIDTH;
 
-  int8_t max_delta = -128;
-  int8_t min_delta = 127;
+  uint32_t max_pos_delta = 0u;
+  uint32_t max_neg_delta = 256u;
 
   // All the following rows are delta to the previous row...
   for (int32_t y = 1; y < height; ++y) {
     for (int32_t x = 0; x < width; ++x) {
       const uint8_t delta = src[x] - src[x - src_stride];
       dst[x] = delta;
-      max_delta = std::max(max_delta, static_cast<int8_t>(delta));
-      min_delta = std::min(min_delta, static_cast<int8_t>(delta));
+      if (delta & 0x80u) {
+        max_neg_delta = std::min(max_neg_delta, static_cast<uint32_t>(delta));
+      } else {
+        max_pos_delta = std::max(max_pos_delta, static_cast<uint32_t>(delta));
+      }
     }
     src += src_stride;
     dst += BLOCK_WIDTH;
   }
 
-  num_bits = required_bits(max_delta, min_delta);
+  num_bits = required_bits(max_neg_delta, max_pos_delta);
 }
 
 void block_2d_delta(const uint8_t* src,
@@ -260,8 +316,8 @@ void block_2d_delta(const uint8_t* src,
                     const int32_t src_stride,
                     uint8_t* dst,
                     uint8_t& num_bits) {
-  int8_t max_delta = -128;
-  int8_t min_delta = 127;
+  uint32_t max_pos_delta = 0u;
+  uint32_t max_neg_delta = 256u;
 
   for (int32_t y = 0; y < height; ++y) {
     for (int32_t x = 0; x < width; ++x) {
@@ -278,41 +334,18 @@ void block_2d_delta(const uint8_t* src,
       const uint8_t delta = src[x] - predicted;
       dst[x] = delta;
       if (x > 0 || y > 0) {
-        max_delta = std::max(max_delta, static_cast<int8_t>(delta));
-        min_delta = std::min(min_delta, static_cast<int8_t>(delta));
+        if (delta & 0x80u) {
+          max_neg_delta = std::min(max_neg_delta, static_cast<uint32_t>(delta));
+        } else {
+          max_pos_delta = std::max(max_pos_delta, static_cast<uint32_t>(delta));
+        }
       }
     }
     src += src_stride;
     dst += BLOCK_WIDTH;
   }
 
-  num_bits = required_bits(max_delta, min_delta);
-}
-
-void block_frame_delta(const uint8_t* src1,
-                       const uint8_t* src2,
-                       const int32_t width,
-                       const int32_t height,
-                       const int32_t src_stride,
-                       uint8_t* dst,
-                       uint8_t& num_bits) {
-  int8_t max_delta = -128;
-  int8_t min_delta = 127;
-
-  // Delta to the previous image.
-  for (int32_t y = 0; y < height; ++y) {
-    for (int32_t x = 0; x < width; ++x) {
-      const uint8_t delta = src2[x] - src1[x];
-      dst[x] = delta;
-      max_delta = std::max(max_delta, static_cast<int8_t>(delta));
-      min_delta = std::min(min_delta, static_cast<int8_t>(delta));
-    }
-    src1 += src_stride;
-    src2 += src_stride;
-    dst += BLOCK_WIDTH;
-  }
-
-  num_bits = required_bits(max_delta, min_delta);
+  num_bits = required_bits(max_neg_delta, max_pos_delta);
 }
 
 void block_copy(const uint8_t* src,
@@ -511,6 +544,17 @@ int main(int argc, const char** argv) {
             best_num_bits = num_bits;
             selected_unpacked_block_no = unpacked_block_no;
           }
+
+#if 0 && defined(DEBUG_PRINT_INFO)
+          static int32_t num_bits_histogram[10];
+          num_bits_histogram[best_num_bits]++;
+          if ((block_no % 100) == 0) {
+            for (int i = 0; i < 9; ++i) {
+              std::cout << num_bits_histogram[i] << " ";
+            }
+            std::cout << num_bits_histogram[9] << "\n";
+          }
+#endif
 
           total_bits += static_cast<int32_t>(best_num_bits);
 
