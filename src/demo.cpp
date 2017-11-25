@@ -11,17 +11,23 @@
 #include <sstream>
 #include <vector>
 
+//#define ENABLE_MOTION_COMPENSATION
+#define ENABLE_FILTER
+
 #ifndef NDEBUG
 #define DEBUG_EXPORT_DELTA_IMAGE
 #define DEBUG_PRINT_INFO
-#endif
+#ifdef ENABLE_FILTER
+#define DEBUG_EXPORT_FILTERED_IMAGE
+#endif  // ENABLE_FILTER
+#endif  // NDEBUG
 
 namespace {
 const int32_t BLOCK_WIDTH = 16;
 const int32_t BLOCK_HEIGHT = 8;
-const int32_t FRAMES_BETWEEN_FORCED_KEY_BLOCK = 16;
+const int32_t FRAMES_BETWEEN_FORCED_KEY_BLOCK = 32;
 
-#if 0
+#if defined(ENABLE_MOTION_COMPENSATION)
 const int32_t MOTION_DELTA_MIN = -8;
 const int32_t MOTION_DELTA_MAX = 7;
 #else
@@ -428,6 +434,10 @@ int main(int argc, const char** argv) {
     std::vector<uint8_t> packed_frame_data(
         static_cast<size_t>(4 + control_data_size + (out_stride * height)));
 
+#ifdef ENABLE_FILTER
+    lomc::image filter_image(width, height);
+#endif
+
     // Pack all images.
     int64_t total_packed_size = 0;
     lomc::image images[2];
@@ -479,7 +489,11 @@ int main(int argc, const char** argv) {
 
           // First choice: frame delta.
           if (can_do_frame_delta) {
+#ifdef ENABLE_FILTER
+            lomc::image& prev_img = filter_image;
+#else
             lomc::image& prev_img = images[(img_no + 1) % 2];
+#endif
             assert(img.width() == prev_img.width() && img.height() == prev_img.height() &&
                    img.stride() == prev_img.stride());
 
@@ -544,6 +558,32 @@ int main(int argc, const char** argv) {
             best_num_bits = num_bits;
             selected_unpacked_block_no = unpacked_block_no;
           }
+
+#ifdef ENABLE_FILTER
+          if (can_do_frame_delta) {
+            for (int32_t i = 0; i < block_h; ++i) {
+              int32_t yy = y + i;
+              const uint8_t* src_data = &img[(yy * img.stride()) + x];
+              uint8_t* dst_data = &filter_image[(yy * filter_image.stride()) + x];
+              for (int32_t j = 0; j < block_w; ++j) {
+                const uint32_t c1 = static_cast<uint32_t>(dst_data[j]);
+                const uint32_t c2 = static_cast<uint32_t>(src_data[j]);
+                //dst_data[j] = static_cast<uint8_t>((c1 + c2) >> 1);
+                dst_data[j] = static_cast<uint8_t>(((c1 * 3) + c2) >> 2);
+              }
+            }
+          } else {
+            // Clear the filtered block: Copy the input image to the filtered image.
+            for (int32_t i = 0; i < block_h; ++i) {
+              int32_t yy = y + i;
+              const uint8_t* src_data = &img[(yy * img.stride()) + x];
+              uint8_t* dst_data = &filter_image[(yy * filter_image.stride()) + x];
+              for (int32_t j = 0; j < block_w; ++j) {
+                dst_data[j] = src_data[j];
+              }
+            }
+          }
+#endif
 
 #if 0 && defined(DEBUG_PRINT_INFO)
           static int32_t num_bits_histogram[10];
@@ -620,10 +660,14 @@ int main(int argc, const char** argv) {
 #endif
 
 #ifdef DEBUG_EXPORT_DELTA_IMAGE
-      // Export the delta image.
-      std::ostringstream out_name;
-      out_name << "out_image_" << std::setfill('0') << std::setw(4) << img_no << ".pgm";
-      delta.save(out_name.str());
+      std::ostringstream delta_file_name;
+      delta_file_name << "out_delta_" << std::setfill('0') << std::setw(4) << img_no << ".pgm";
+      delta.save(delta_file_name.str());
+#endif
+#ifdef DEBUG_EXPORT_FILTERED_IMAGE
+      std::ostringstream filtered_file_name;
+      filtered_file_name << "out_filt_" << std::setfill('0') << std::setw(4) << img_no << ".pgm";
+      filter_image.save(filtered_file_name.str());
 #endif
     }
 
