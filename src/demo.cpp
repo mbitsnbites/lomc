@@ -11,7 +11,7 @@
 #include <sstream>
 #include <vector>
 
-//#define ENABLE_MOTION_COMPENSATION
+#define ENABLE_MOTION_COMPENSATION
 #define ENABLE_FILTER
 
 #ifndef NDEBUG
@@ -27,13 +27,8 @@ const int32_t BLOCK_WIDTH = 16;
 const int32_t BLOCK_HEIGHT = 8;
 const int32_t FRAMES_BETWEEN_FORCED_KEY_BLOCK = 32;
 
-#if defined(ENABLE_MOTION_COMPENSATION)
 const int32_t MOTION_DELTA_MIN = -8;
 const int32_t MOTION_DELTA_MAX = 7;
-#else
-const int32_t MOTION_DELTA_MIN = 0;
-const int32_t MOTION_DELTA_MAX = 0;
-#endif
 
 enum block_type { BLOCK_DELTA_FRAME = 0, BLOCK_DELTA_ROW = 1, BLOCK_COPY = 2 };
 
@@ -253,6 +248,23 @@ void unpackbits_8(const uint8_t*& packed, uint8_t* unpacked) {
   packed += 16;
 }
 
+int32_t match_score(const uint8_t* src1,
+                    const uint8_t* src2,
+                    const int32_t width,
+                    const int32_t height,
+                    const int32_t stride) {
+  int32_t score = 0U;
+  for (int32_t y = 0; y < height; ++y) {
+    for (int32_t x = 0; x < width; ++x) {
+      const int32_t delta = static_cast<int32_t>(src2[x]) - static_cast<int32_t>(src1[x]);
+      score += delta * delta;
+    }
+    src1 += stride;
+    src2 += stride;
+  }
+  return score;
+}
+
 void block_frame_delta(const uint8_t* src1,
                        const uint8_t* src2,
                        const int32_t width,
@@ -443,6 +455,7 @@ int main(int argc, const char** argv) {
     lomc::image images[2];
     for (int32_t img_no = 0u; img_no < num_images; ++img_no) {
       lomc::image& img = images[img_no % 2];
+      lomc::image& prev_img = images[(img_no + 1) % 2];
 
       // Load the image.
       std::string file_name = argv[img_no + 1];
@@ -487,42 +500,71 @@ int main(int argc, const char** argv) {
           int32_t selected_unpacked_block_no = 0;
           block_type bt = BLOCK_COPY;
 
-          // First choice: frame delta.
+          int32_t motion_dx = 0;
+          int32_t motion_dy = 0;
+          bool can_use_filter = false;
+#ifdef ENABLE_MOTION_COMPENSATION
           if (can_do_frame_delta) {
-#ifdef ENABLE_FILTER
-            lomc::image& prev_img = filter_image;
-#else
-            lomc::image& prev_img = images[(img_no + 1) % 2];
-#endif
-            assert(img.width() == prev_img.width() && img.height() == prev_img.height() &&
-                   img.stride() == prev_img.stride());
-
-            // Make a delta to the previous frame. This ususally has the best compression.
             const int32_t min_x_offset = std::max(MOTION_DELTA_MIN, -x);
             const int32_t max_x_offset = std::min(MOTION_DELTA_MAX, width - block_w - x);
             const int32_t min_y_offset = std::max(MOTION_DELTA_MIN, -y);
             const int32_t max_y_offset = std::min(MOTION_DELTA_MAX, height - block_h - y);
-            int32_t best_dx = 0;
-            int32_t best_dy = 0;
+            int32_t min_error = 0x7fffffffu;
+            int32_t min_offset = 0x7fffffffu;
             for (int32_t dy = min_y_offset; dy <= max_y_offset; ++dy) {
               for (int32_t dx = min_x_offset; dx <= max_x_offset; ++dx) {
-                int32_t unpacked_block_no = (selected_unpacked_block_no + 1) % 2;
-                uint8_t num_bits;
-                block_frame_delta(&prev_img[((y + dy) * img.stride()) + (x + dx)],
-                                  &img[(y * img.stride()) + x],
-                                  block_w,
-                                  block_h,
-                                  img.stride(),
-                                  unpacked_block_data[unpacked_block_no],
-                                  num_bits);
-                if (num_bits < best_num_bits) {
-                  bt = BLOCK_DELTA_FRAME;
-                  best_num_bits = num_bits;
-                  selected_unpacked_block_no = unpacked_block_no;
-                  best_dx = dx;  // TODO(m): These should be encoded as part of the block meta.
-                  best_dy = dy;
+                int32_t error = match_score(&prev_img[((y + dy) * img.stride()) + (x + dx)],
+                                            &img[(y * img.stride()) + x],
+                                            block_w,
+                                            block_h,
+                                            img.stride());
+                if (error <= min_error) {
+                  int32_t offset = (dx * dx) + (dy * dy);
+                  if ((error < min_error) || (offset < min_offset)) {
+                    motion_dx = dx;
+                    motion_dy = dy;
+                    min_error = error;
+                    min_offset = offset;
+                  }
                 }
               }
+            }
+
+            // Could we find a good enough match?
+            const int32_t ERROR_THRESHOLD = (BLOCK_HEIGHT * BLOCK_WIDTH) * (20 * 20);
+            if (min_error <= ERROR_THRESHOLD) {
+              can_use_filter = true;
+            } else {
+              motion_dx = 0;
+              motion_dy = 0;
+            }
+          }
+#endif
+
+          // First choice: frame delta.
+          if (can_do_frame_delta) {
+#ifdef ENABLE_FILTER
+            lomc::image& delta_img = can_use_filter ? filter_image : prev_img;
+#else
+            lomc::image& delta_img = prev_img;
+#endif
+            assert(img.width() == delta_img.width() && img.height() == delta_img.height() &&
+                   img.stride() == delta_img.stride());
+
+            // Make a delta to the previous frame. This ususally has the best compression.
+            int32_t unpacked_block_no = (selected_unpacked_block_no + 1) % 2;
+            uint8_t num_bits;
+            block_frame_delta(&delta_img[((y + motion_dy) * img.stride()) + (x + motion_dx)],
+                              &img[(y * img.stride()) + x],
+                              block_w,
+                              block_h,
+                              img.stride(),
+                              unpacked_block_data[unpacked_block_no],
+                              num_bits);
+            if (num_bits < best_num_bits) {
+              bt = BLOCK_DELTA_FRAME;
+              best_num_bits = num_bits;
+              selected_unpacked_block_no = unpacked_block_no;
             }
           }
 
@@ -560,15 +602,16 @@ int main(int argc, const char** argv) {
           }
 
 #ifdef ENABLE_FILTER
-          if (can_do_frame_delta) {
+          if (can_use_filter) {
             for (int32_t i = 0; i < block_h; ++i) {
               int32_t yy = y + i;
-              const uint8_t* src_data = &img[(yy * img.stride()) + x];
+              const uint8_t* src1_data =
+                  &filter_image[((yy + motion_dy) * filter_image.stride()) + (x + motion_dx)];
+              const uint8_t* src2_data = &img[(yy * img.stride()) + x];
               uint8_t* dst_data = &filter_image[(yy * filter_image.stride()) + x];
               for (int32_t j = 0; j < block_w; ++j) {
-                const uint32_t c1 = static_cast<uint32_t>(dst_data[j]);
-                const uint32_t c2 = static_cast<uint32_t>(src_data[j]);
-                //dst_data[j] = static_cast<uint8_t>((c1 + c2) >> 1);
+                const uint32_t c1 = static_cast<uint32_t>(src1_data[j]);
+                const uint32_t c2 = static_cast<uint32_t>(src2_data[j]);
                 dst_data[j] = static_cast<uint8_t>(((c1 * 3) + c2) >> 2);
               }
             }
@@ -642,7 +685,20 @@ int main(int argc, const char** argv) {
           }
 #endif
           ++block_no;
+
+#if defined(DEBUG_PRINT_INFO)
+          {
+            static const char ascii_art[] = {'.', '-', '+', '*'};
+            int32_t d = (motion_dx * motion_dx) + (motion_dy * motion_dy);
+            d = ((d * 3) + 64) / 128;
+            assert(d < 4);
+            std::cout << ascii_art[d];
+          }
+#endif
         }
+#if defined(DEBUG_PRINT_INFO)
+        std::cout << "\n";
+#endif
       }
 
       // Append the packed data to the output stream.
